@@ -31,6 +31,7 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
+#include <zephyr/settings/settings.h>
 
 #define NAME_LEN 30
 #define PA_SYNC_SKIP         5
@@ -92,8 +93,8 @@ static bool device_found(struct bt_data *data, void *user_data)
 		memcpy(sr_info->broadcast_name, data->data, MIN(data->data_len, NAME_LEN - 1));
 		return true;
 	case BT_DATA_SVC_DATA16:
-		/* Check for Broadcast ID */
-		if (data->data_len < BT_UUID_SIZE_16 + BT_AUDIO_BROADCAST_ID_SIZE) {
+		/* Need at least the 16-bit UUID itself */
+		if (data->data_len < BT_UUID_SIZE_16) {
 			return true;
 		}
 
@@ -101,7 +102,27 @@ static bool device_found(struct bt_data *data, void *user_data)
 			return true;
 		}
 
+		/* Per BAP 1.0.1 section 3.9.2, a Scan Delegator implementing a
+		* Broadcast Sink should advertise BASS as service data. Some sinks
+		* put it in the UUID list instead, which is handled below; this
+		* branch covers the spec-compliant case.
+		*/
+		if (bt_uuid_cmp(&adv_uuid.uuid, BT_UUID_BASS) == 0) {
+			sr_info->has_bass = true;
+			return true;
+		}
+
+		if (bt_uuid_cmp(&adv_uuid.uuid, BT_UUID_PACS) == 0) {
+			sr_info->has_pacs = true;
+			return true;
+		}
+
 		if (bt_uuid_cmp(&adv_uuid.uuid, BT_UUID_BROADCAST_AUDIO) != 0) {
+			return true;
+		}
+
+		/* Broadcast Audio Announcement carries a 24-bit Broadcast ID */
+		if (data->data_len < BT_UUID_SIZE_16 + BT_AUDIO_BROADCAST_ID_SIZE) {
 			return true;
 		}
 
@@ -361,9 +382,6 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info,
 			bt_addr_le_copy(&selected_addr, info->addr);
 
 			k_sem_give(&sem_source_discovered);
-
-			printk("Attempting to PA sync to the broadcaster with id 0x%06X\n",
-			       selected_broadcast_id);
 		}
 	} else {
 		/* Scan for and connect to Broadcast Sink */
@@ -375,7 +393,7 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info,
 
 		bt_data_parse(ad, device_found, (void *)&sr_info);
 
-		if (sr_info.has_bass && sr_info.has_pacs) {
+		if (sr_info.has_bass) {
 			printk("Broadcast Sink Found:\n");
 			printk("  BT Name:        %s\n", sr_info.bt_name);
 
@@ -449,7 +467,7 @@ static void scan_for_broadcast_sink(void)
 		return;
 	}
 
-	printk("Scanning for Broadcast Sink successfully started\n");
+	printk("Scanning for Broadcast Sink successfully started [FLASH 3]\n");
 
 	err = k_sem_take(&sem_sink_discovered, K_FOREVER);
 	__ASSERT_NO_MSG(err == 0);
@@ -677,7 +695,11 @@ int main(void)
 		printk("Bluetooth init failed (err %d)\n", err);
 		return 0;
 	}
-
+	
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		settings_load();
+	}
+	
 	printk("Bluetooth initialized\n");
 
 	bt_bap_broadcast_assistant_register_cb(&ba_cbs);
@@ -688,6 +710,7 @@ int main(void)
 
 	while (true) {
 		struct bt_bap_broadcast_assistant_add_src_param param = {0};
+		struct bt_bap_bass_subgroup subgroup = {0};
 
 		reset();
 
@@ -723,63 +746,40 @@ int main(void)
 			continue;
 		}
 
-		/* TODO: Discover and parse the PACS on the sink and use the information
-		 * when discovering and adding a source to the sink.
-		 * Also, before populating the parameters to sync to the broadcast source
-		 * first, parse the source BASE and determine if the sink supports the source.
-		 * If not, then look for another source.
-		 */
-
 		scan_for_broadcast_source();
 
-		printk("Attempting to PA sync to the broadcaster with id 0x%06X\n",
-		       selected_broadcast_id);
-		err = pa_sync_create();
-		if (err != 0) {
-			printk("Could not create Broadcast PA sync: %d\n", err);
-			continue;
-		}
+		printk("Selected source: id 0x%06X, sid %u, interval %u, addr %s\n",
+		       selected_broadcast_id, selected_sid, selected_pa_interval,
+		       bt_addr_le_str(&selected_addr));
 
-		printk("Waiting for PA synced\n");
-		err = k_sem_take(&sem_pa_synced, SEM_TIMEOUT);
-		if (err != 0) {
-			printk("Failed to take sem_pa_synced (err %d)\n", err);
-			continue;
-		}
-
-		memset(bass_subgroups, 0, sizeof(bass_subgroups));
-		bt_addr_le_copy(&param.addr, &selected_addr);
+		/* The assistant does not sync to the periodic advertising train
+		 * itself. Instead the sink is told to sync (pa_sync = true) and
+		 * to choose its own BIS (BT_BAP_BIS_SYNC_NO_PREF), so the BASE
+		 * never needs to be read here. See BAP 1.0.1, PA_Sync value 0x02.
+		 */
+		param.addr = selected_addr;
 		param.adv_sid = selected_sid;
-		param.pa_interval = selected_pa_interval;
 		param.broadcast_id = selected_broadcast_id;
+		param.pa_interval = selected_pa_interval;
 		param.pa_sync = true;
-		param.subgroups = bass_subgroups;
 
-		/* Wait to receive subgroups */
-		err = k_sem_take(&sem_received_base_subgroups, K_FOREVER);
-		__ASSERT_NO_MSG(err == 0);
+		subgroup.bis_sync = BT_BAP_BIS_SYNC_NO_PREF;
+		subgroup.metadata_len = 0;
 
-		err = k_mutex_lock(&base_store_mutex, K_FOREVER);
-		__ASSERT_NO_MSG(err == 0);
-		err = bt_bap_base_foreach_subgroup((const struct bt_bap_base *)received_base,
-						   add_pa_sync_base_subgroup_cb, &param);
-		err = k_mutex_unlock(&base_store_mutex);
-		__ASSERT_NO_MSG(err == 0);
+		param.num_subgroups = 1;
+		param.subgroups = &subgroup;
 
-		if (err != 0) {
-			printk("Could not add BASE to params %d\n", err);
-			continue;
-		}
+		printk("Adding source to the sink\n");
 
 		err = bt_bap_broadcast_assistant_add_src(broadcast_sink_conn, &param);
-		if (err != 0) {
-			printk("Failed to add source: %d\n", err);
+		if (err) {
+			printk("Failed to add source (err %d)\n", err);
 			continue;
 		}
 
-		/* Reset if the sink disconnects */
-		err = k_sem_take(&sem_sink_disconnected, K_FOREVER);
-		__ASSERT_NO_MSG(err == 0);
+		printk("Add Source sent — watch the receive state callback\n");
+
+		k_sleep(K_FOREVER);
 	}
 
 	return 0;
