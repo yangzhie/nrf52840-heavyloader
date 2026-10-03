@@ -32,6 +32,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 #include <zephyr/settings/settings.h>
+#include "metadata.h"
 
 // Definitions
 #define NAME_LEN 30 // 30 bytes, size of name buffers
@@ -39,9 +40,11 @@
 
 // Temp. struct for one advertisement
 struct scan_recv_info {
+	struct metadata metadata;
 	char bt_name[NAME_LEN]; // Device local name
 	char broadcast_name[NAME_LEN]; // Auracast name 
 	uint32_t broadcast_id; // 24-bit Auracast Broadcast ID
+	bool has_metadata;
 	bool has_bass; // BASS flag
 	bool has_pacs; // PACS flag
 };
@@ -91,6 +94,24 @@ static bool device_found(struct bt_data *data, void *user_data)
 
 	// Branching on the AD type bytes
 	switch (data->type) {
+	case BT_DATA_MANUFACTURER_DATA:
+		// Check: length of metadata
+		if (data->data_len < 2 + METADATA_MIN_LEN) {
+			return true;
+		}
+
+		// Read and compare company ID
+		if (sys_get_le16(data->data) != METADATA_COMPANY_ID) {
+			return true;
+		}
+
+		// Call parser - from after company ID, length excludes company ID
+		if(metadata_parse(&data->data[2], data->data_len - 2, &sr_info->metadata)) {
+			// Set success flag
+			sr_info->has_metadata = true;
+		}
+
+		return true;
 	case BT_DATA_NAME_SHORTENED: // Truncated device name
 	case BT_DATA_NAME_COMPLETE: // Full device name
 		// Copy the name, or 29 bytes whichever one is smallest
@@ -234,6 +255,15 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			printk("Broadcast Name: %s\n", sr_info.broadcast_name);
 			printk("Broadcast ID: 0x%06x\n\n", sr_info.broadcast_id);
 
+			// Check: metadata
+			if (sr_info.has_metadata) {
+				printk("Route: %u, Stop: %u, Dir: %u, Lang: %u\n",
+					sr_info.metadata.route_id, sr_info.metadata.stop_index,
+					sr_info.metadata.direction, sr_info.metadata.language);
+			} else {
+				printk("No project metadata\n");
+			}
+			
 			// Stop scanning, no data more is needed
 			err = bt_le_scan_stop();
 			if (err != 0) {
@@ -251,6 +281,7 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			// Hand-off to main function
 			k_sem_give(&sem_source_discovered);
 		}
+
 	} else { // Not already scanning for source
 		// Scan for and connect to Broadcast Sink
 
