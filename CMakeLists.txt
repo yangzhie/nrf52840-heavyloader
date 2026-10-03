@@ -6,6 +6,7 @@ project(bap_broadcast_assistant)
 
 target_sources(app PRIVATE
   src/main.c
+  src/metadata.c
 )
 
 zephyr_library_include_directories(${ZEPHYR_BASE}/samples/bluetooth)
