@@ -59,6 +59,9 @@ static uint8_t selected_sid;
 static uint16_t selected_pa_interval;
 static bt_addr_le_t selected_addr;
 
+// Comes in from Auracast companion over GATT
+static uint8_t requested_stop_index = 1; // Hardcoded for now, 0 = nothing requested
+
 // True when scanning for a source, false when scanning for a sink
 static bool scanning_for_broadcast_source;
 
@@ -255,13 +258,19 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			printk("Broadcast Name: %s\n", sr_info.broadcast_name);
 			printk("Broadcast ID: 0x%06x\n\n", sr_info.broadcast_id);
 
-			// Check: metadata
+			// Check: metadata is present in incoming Auracast broadcast
 			if (sr_info.has_metadata) {
 				printk("Route: %u, Stop: %u, Dir: %u, Lang: %u\n",
 					sr_info.metadata.route_id, sr_info.metadata.stop_index,
 					sr_info.metadata.direction, sr_info.metadata.language);
 			} else {
 				printk("No project metadata\n");
+			}
+
+			// Check: advertisement comes from the correct stop with provisioned dongle
+			if (sr_info.metadata.stop_index != requested_stop_index) {
+				// Abandon the advertisement
+				return;
 			}
 			
 			// Stop scanning, no data more is needed
