@@ -32,7 +32,9 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 #include <zephyr/settings/settings.h>
+
 #include "metadata.h"
+#include "gatt_link.h"
 
 // Definitions
 #define NAME_LEN 30 // 30 bytes, size of name buffers
@@ -58,9 +60,6 @@ static uint32_t selected_broadcast_id;
 static uint8_t selected_sid;
 static uint16_t selected_pa_interval;
 static bt_addr_le_t selected_addr;
-
-// Comes in from Auracast companion over GATT
-static uint8_t requested_stop_index = 1; // Hardcoded for now, 0 = nothing requested
 
 // True when scanning for a source, false when scanning for a sink
 static bool scanning_for_broadcast_source;
@@ -193,41 +192,6 @@ static bool device_found(struct bt_data *data, void *user_data)
 }
 
 /**
- * Substring checker.
- * 
- * @param substr child string to be checked
- * @param str parent string
- * 
- * @return true if original string contains child string 
- */
-static bool is_substring(const char *substr, const char *str)
-{
-	// Length of both strings
-	const size_t str_len = strlen(str);
-	const size_t sub_str_len = strlen(substr);
-
-	// Check: sub-string length is bigger
-	if (sub_str_len > str_len) {
-		return false;
-	}
-
-	// Slide a window along the original string
-	for (size_t pos = 0; pos < str_len; pos++) {
-		// Check: sub-string exceeds original string
-		if (pos + sub_str_len > str_len) {
-			return false;
-		}
-
-		// Compare
-		if (strncasecmp(substr, &str[pos], sub_str_len) == 0) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
-/**
  * Zephyr calls when radio picks up an advertisment.
  * 
  * @param info metadata about reception (sender address, RSSI, advertising SID, etc.).
@@ -268,7 +232,7 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			}
 
 			// Check: advertisement comes from the correct stop with provisioned dongle
-			if (sr_info.metadata.stop_index != requested_stop_index) {
+			if (sr_info.metadata.stop_index != gatt_link_get_requested_stop_index()) {
 				// Abandon the advertisement
 				return;
 			}
@@ -633,6 +597,12 @@ int main(void)
 	// Load config
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
 		settings_load();
+	}
+	
+	// Enable GATT server
+	err = gatt_link_init();
+	if (err != 0) {
+		printk("Failed to start the phone link (err %d)\n", err);
 	}
 
 	printk("Bluetooth initialized\n");

@@ -1,5 +1,6 @@
-#include "metadata.h"
 #include <zephyr/sys/byteorder.h>
+
+#include "metadata.h"
 
 bool metadata_parse(const uint8_t *data, size_t len, struct metadata *out)
 {
