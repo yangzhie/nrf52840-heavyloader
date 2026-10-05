@@ -40,6 +40,7 @@
 // Definitions
 #define NAME_LEN 30 // 30 bytes, size of name buffers
 #define SEM_TIMEOUT K_SECONDS(10) // Semaphore for threads
+#define BROADCAST_CODE "AURA86DEMO2026" // Shared with all 4 stops
 
 // Temp. struct for one advertisement
 struct scan_recv_info {
@@ -70,7 +71,6 @@ static bool scanning_for_broadcast_source;
 
 // Semaphores for discovery, connection and disconnections
 static K_SEM_DEFINE(sem_source_discovered, 0, 1);
-static K_SEM_DEFINE(sem_sink_discovered, 0, 1);
 static K_SEM_DEFINE(sem_sink_connected, 0, 1);
 static K_SEM_DEFINE(sem_sink_disconnected, 0, 1);
 static K_SEM_DEFINE(sem_security_updated, 0, 1);
@@ -299,8 +299,6 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 				printk("Failed creating connection (err=%u)\n", err);
 				return;
 			}
-
-			k_sem_give(&sem_sink_discovered);
 		}
 	}
 }
@@ -602,7 +600,6 @@ static void reset(void)
 	current_src_id = 0;
 
 	k_sem_reset(&sem_source_discovered);
-	k_sem_reset(&sem_sink_discovered);
 	k_sem_reset(&sem_sink_connected);
 	k_sem_reset(&sem_sink_disconnected);
 	k_sem_reset(&sem_security_updated);
@@ -646,11 +643,11 @@ static int read_recv_states(void)
 
 static void remove_current_source(void)
 {
-	int err;
-
-	if (current_src_id == 0) {
+	if (broadcast_sink_conn == NULL || current_src_id == 0) {
 		return;
 	}
+
+	int err;
 
 	printk("Removing source %u\n", current_src_id);
 
@@ -717,6 +714,10 @@ static int connect_to_sink(void)
  */
 static int join_requested_stop(void)
 {
+	if (broadcast_sink_conn == NULL) {
+		return -ENOTCONN;
+	}
+
 	struct bt_bap_broadcast_assistant_add_src_param param = {0};
 	struct bt_bap_bass_subgroup subgroup = {0};
 	int err;
@@ -748,6 +749,8 @@ static int join_requested_stop(void)
 
 	param.num_subgroups = 1;
 	param.subgroups = &subgroup;
+
+	memcpy(param.broadcast_code, BROADCAST_CODE, sizeof(BROADCAST_CODE) - 1);
 
 	printk("Adding source to the sink\n");
 
@@ -812,7 +815,8 @@ int main(void)
 		while (broadcast_sink_conn != NULL) {
 			uint8_t stop;
 
-			if (gatt_link_wait_for_command(K_FOREVER) != 0) {
+			if (gatt_link_wait_for_command(K_SECONDS(2)) != 0) {
+				// Re-check the sink
 				continue;
 			}
 
