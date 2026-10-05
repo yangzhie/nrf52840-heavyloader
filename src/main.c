@@ -53,6 +53,10 @@ struct scan_recv_info {
 	bool has_pacs; // PACS flag
 };
 
+// Broadcast code
+static uint8_t broadcast_code[BT_ISO_BROADCAST_CODE_SIZE];
+BUILD_ASSERT(sizeof(BROADCAST_CODE) - 1 <= BT_ISO_BROADCAST_CODE_SIZE, "Broadcast code is too long");
+
 // Link with broadcast sink
 static struct bt_conn *broadcast_sink_conn;
 
@@ -524,6 +528,15 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 
 	// State table is non-empty, can connect to sink
 	if (state != NULL) {
+		// Set source's ID
+		current_src_id = state->src_id;
+		
+		// Sink asks for code when synced to periodic advertising
+		if (state->encrypt_state == BT_BAP_BIG_ENC_STATE_BCODE_REQ) {
+			printk("Broadcast code required, supplying it\n");
+			bt_bap_broadcast_assistant_set_broadcast_code(conn, state->src_id, broadcast_code);
+		}
+
 		printk("BASS recv state: src_id %u, addr %s, sid %u, sync_state %u, encrypt_state "
 		       "%u, num_subgroups %u\n", state->src_id, bt_addr_le_str(&state->addr),
 		       state->adv_sid, state->pa_sync_state, state->encrypt_state,
@@ -540,9 +553,6 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 				receiving = true;
 			}
 		}
-
-		// Set source's ID
-		current_src_id = state->src_id;
 
 		if (receiving) {
 			gatt_link_set_state(GATT_LINK_RECEIVING);
@@ -749,9 +759,7 @@ static int join_requested_stop(void)
 
 	param.num_subgroups = 1;
 	param.subgroups = &subgroup;
-
-	memcpy(param.broadcast_code, BROADCAST_CODE, sizeof(BROADCAST_CODE) - 1);
-
+	
 	printk("Adding source to the sink\n");
 
 	err = bt_bap_broadcast_assistant_add_src(broadcast_sink_conn, &param);
@@ -798,6 +806,8 @@ int main(void)
 	// Registers the two callback structs with Zephyr
 	bt_bap_broadcast_assistant_register_cb(&ba_cbs);
 	bt_le_scan_cb_register(&scan_callbacks);
+
+	memcpy(broadcast_code, BROADCAST_CODE, sizeof(BROADCAST_CODE) - 1);
 
 	while (true) {
 		reset();
