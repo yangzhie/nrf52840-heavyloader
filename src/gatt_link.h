@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+#include <zephyr/kernel.h>
+
 // GATT state enum
 enum gatt_link_state {
 	GATT_LINK_IDLE, // Nothing requested
@@ -29,3 +31,11 @@ uint8_t gatt_link_get_requested_stop_index(void);
  * Setter for notification state
  */
 void gatt_link_set_state(enum gatt_link_state state);
+
+/**
+ * Blocks until the phone writes a stop request.
+ *
+ * @param timeout how long to wait, or K_FOREVER
+ * @return 0 if a command arrived
+ */
+int gatt_link_wait_for_command(k_timeout_t timeout);

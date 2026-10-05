@@ -19,6 +19,8 @@ static bool notifications_enabled;
 // Storing current state
 static enum gatt_link_state current_state = GATT_LINK_IDLE;
 
+static K_SEM_DEFINE(sem_command_received, 0, 1);
+
 /**
  * Names for the GATT DB, which is a flat list
  * of attributes.
@@ -81,6 +83,9 @@ static ssize_t write_command(struct bt_conn *conn, const struct bt_gatt_attr *at
 		printk("Phone requested: stop %u\n", requested_stop_index);
 	}
 
+	// Command received, unblock thread
+	k_sem_give(&sem_command_received);
+
 	return len;
 }
 
@@ -113,6 +118,11 @@ BT_GATT_SERVICE_DEFINE(auracast_svc,
 	BT_GATT_CCC(status_changed,
 		    BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
+
+int gatt_link_wait_for_command(k_timeout_t timeout)
+{
+	return k_sem_take(&sem_command_received, timeout);
+}
 
 static void gatt_link_notify_state(enum gatt_link_state state)
 {

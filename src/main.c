@@ -54,6 +54,9 @@ struct scan_recv_info {
 // Link with broadcast sink
 static struct bt_conn *broadcast_sink_conn;
 
+// Sink's handle for source - 0 = none active
+static uint8_t current_src_id;
+
 // Source scan findings - callbacks fill, main adds to source
 static uint8_t remote_recv_state_count; // How many receive states the sink exposes
 static uint32_t selected_broadcast_id;
@@ -72,6 +75,7 @@ static K_SEM_DEFINE(sem_sink_disconnected, 0, 1);
 static K_SEM_DEFINE(sem_security_updated, 0, 1);
 static K_SEM_DEFINE(sem_bass_discovered, 0, 1);
 static K_SEM_DEFINE(sem_recv_state_read, 0, 1);
+static K_SEM_DEFINE(sem_source_removed, 0, 1);
 
 /**
  * Callback for bt_data_parse. Handles one element from the chain
@@ -311,9 +315,11 @@ static struct bt_le_scan_cb scan_callbacks = {
 };
 
 /**
- * Scanning for a broadcast source.
+ * Scans for a broadcast source matching the requested stop.
+ * 
+ * @return 0 if one was found
  */
-static void scan_for_broadcast_source(void)
+static int scan_for_broadcast_source(void)
 {
 	int err;
 
@@ -324,14 +330,20 @@ static void scan_for_broadcast_source(void)
 	err = bt_le_scan_start(BT_LE_SCAN_PASSIVE, NULL);
 	if (err) {
 		printk("Scanning failed to start (err %d)\n", err);
-		return;
+		return err;
 	}
 
 	printk("Scanning for Broadcast Source successfully started\n");
 
 	// Block thread until scan_recv_cb gives semaphore
-	err = k_sem_take(&sem_source_discovered, K_FOREVER);
-	__ASSERT_NO_MSG(err == 0);
+	// 10s scanning timeout
+	err = k_sem_take(&sem_source_discovered, SEM_TIMEOUT);
+	if (err != 0) {
+		printk("No matching source found within the timeout\n");
+		(void)bt_le_scan_stop();
+	}
+
+	return err;
 }
 
 /**
@@ -352,10 +364,6 @@ static void scan_for_broadcast_sink(void)
 	}
 
 	printk("Scanning for Broadcast Sink successfully started\n");
-
-	// Halt thread until sink is discovered
-	err = k_sem_take(&sem_sink_discovered, K_FOREVER);
-	__ASSERT_NO_MSG(err == 0);
 }
 
 /**
@@ -469,6 +477,24 @@ static void bap_broadcast_assistant_add_src_cb(struct bt_conn *conn, int err)
 }
 
 /**
+ * Adding a source via sink's BASS service. 
+ * 
+ * @param conn Bluetooth connection
+ * @param err error
+ */
+static void bap_broadcast_assistant_rem_src_cb(struct bt_conn *conn, int err)
+{
+	if (err == 0) {
+		current_src_id = 0;
+		printk("BASS remove source successful\n");
+	} else {
+		printk("BASS remove source failed (%d)\n", err);
+	}
+
+	k_sem_give(&sem_source_removed);
+}
+
+/**
  * Tells whether anything actually worked.
  * 
  * Fires via read_recv_states() and when sink tells you.
@@ -504,6 +530,9 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 			}
 		}
 
+		// Set source's ID
+		current_src_id = state->src_id;
+
 		if (receiving) {
 			gatt_link_set_state(GATT_LINK_RECEIVING);
 		} else if (state->pa_sync_state == 3) {
@@ -523,6 +552,7 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 static struct bt_bap_broadcast_assistant_cb ba_cbs = {
 	.discover = bap_broadcast_assistant_discover_cb,
 	.add_src = bap_broadcast_assistant_add_src_cb,
+	.rem_src = bap_broadcast_assistant_rem_src_cb,
 	.recv_state = bap_broadcast_assistant_recv_state_read_cb,
 };
 
@@ -555,6 +585,9 @@ static void reset(void)
 	selected_pa_interval = 0;
 	(void)memset(&selected_addr, 0, sizeof(selected_addr));
 
+	// Clear source
+	current_src_id = 0;
+
 	k_sem_reset(&sem_source_discovered);
 	k_sem_reset(&sem_sink_discovered);
 	k_sem_reset(&sem_sink_connected);
@@ -562,6 +595,7 @@ static void reset(void)
 	k_sem_reset(&sem_security_updated);
 	k_sem_reset(&sem_bass_discovered);
 	k_sem_reset(&sem_recv_state_read);
+	k_sem_reset(&sem_source_removed);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -594,6 +628,124 @@ static int read_recv_states(void)
 		}
 	}
 
+	return 0;
+}
+
+static void remove_current_source(void)
+{
+	int err;
+
+	if (current_src_id == 0) {
+		return;
+	}
+
+	printk("Removing source %u\n", current_src_id);
+
+	err = bt_bap_broadcast_assistant_rem_src(broadcast_sink_conn, current_src_id);
+	if (err != 0) {
+		current_src_id = 0;
+		printk("Failed to remove source (err %d)\n", err);
+		return;
+	}
+
+	err = k_sem_take(&sem_source_removed, SEM_TIMEOUT);
+	if (err != 0) {
+		current_src_id = 0;
+		printk("Timed out removing source\n");
+	}
+}
+
+/**
+ * Connects to the sink and discovers its BASS service.
+ *
+ * @return 0 when the sink is ready to accept sources
+ */
+static int connect_to_sink(void)
+{
+	int err;
+
+	scan_for_broadcast_sink();
+
+	err = k_sem_take(&sem_sink_connected, SEM_TIMEOUT);
+	if (err != 0) {
+		printk("Failed to take sem_sink_connected (err %d)\n", err);
+		return err;
+	}
+
+	err = bt_bap_broadcast_assistant_discover(broadcast_sink_conn);
+	if (err != 0) {
+		printk("Failed to discover BASS on the sink (err %d)\n", err);
+		return err;
+	}
+
+	/* 
+	 * BASS needs encrypted link, and discovery triggers the
+	 * security upgrade, so security completes before discovery does.
+	 */
+	err = k_sem_take(&sem_security_updated, SEM_TIMEOUT);
+	if (err != 0) {
+		printk("Failed to take sem_security_updated (err %d)\n", err);
+		return err;
+	}
+
+	err = k_sem_take(&sem_bass_discovered, SEM_TIMEOUT);
+	if (err != 0) {
+		printk("Failed to take sem_bass_discovered (err %d)\n", err);
+		return err;
+	}
+
+	return read_recv_states();
+}
+
+/**
+ * Scans for the requested stop's transmitter and tells the sink to join it.
+ *
+ * @return 0 if Add Source was sent
+ */
+static int join_requested_stop(void)
+{
+	struct bt_bap_broadcast_assistant_add_src_param param = {0};
+	struct bt_bap_bass_subgroup subgroup = {0};
+	int err;
+
+	gatt_link_set_state(GATT_LINK_SCANNING);
+
+	err = scan_for_broadcast_source();
+	if (err != 0) {
+		gatt_link_set_state(GATT_LINK_FAILED);
+		return err;
+	}
+
+	printk("Selected source: id 0x%06X, sid %u, interval %u, addr %s\n",
+	       selected_broadcast_id, selected_sid, selected_pa_interval,
+	       bt_addr_le_str(&selected_addr));
+
+	/* 
+	 * Sink syncs to the periodic advertising itself (pa_sync = true)
+	 * and picks its own BIS, so the BASE never needs reading here.
+	 */
+	param.addr = selected_addr;
+	param.adv_sid = selected_sid;
+	param.broadcast_id = selected_broadcast_id;
+	param.pa_interval = selected_pa_interval;
+	param.pa_sync = true;
+
+	subgroup.bis_sync = BT_BAP_BIS_SYNC_NO_PREF;
+	subgroup.metadata_len = 0;
+
+	param.num_subgroups = 1;
+	param.subgroups = &subgroup;
+
+	printk("Adding source to the sink\n");
+
+	err = bt_bap_broadcast_assistant_add_src(broadcast_sink_conn, &param);
+	if (err != 0) {
+		printk("Failed to add source (err %d)\n", err);
+		gatt_link_set_state(GATT_LINK_FAILED);
+		return err;
+	}
+
+	gatt_link_set_state(GATT_LINK_CONNECTING);
 	return 0;
 }
 
@@ -632,95 +784,43 @@ int main(void)
 	bt_le_scan_cb_register(&scan_callbacks);
 
 	while (true) {
-		// Fresh structs 
-		struct bt_bap_broadcast_assistant_add_src_param param = {0};
-		struct bt_bap_bass_subgroup subgroup = {0};
-
-		// Kill anything from prev. attempt
 		reset();
 
-		// Sink scan + connection *underway*, not connected
-		scan_for_broadcast_sink();
-
-		// Wait for sink to connect
-		err = k_sem_take(&sem_sink_connected, SEM_TIMEOUT);
-		if (err != 0) {
-			printk("Failed to take sem_sink_connected (err %d)\n", err);
+		if (connect_to_sink() != 0) {
 			continue;
 		}
 
-		// BASS discovery - start GATT service, return instantly
-		err = bt_bap_broadcast_assistant_discover(broadcast_sink_conn);
-		if (err != 0) {
-			printk("Failed to discover BASS on the sink (err %d)\n", err);
-			continue;
-		}
+		gatt_link_set_state(GATT_LINK_IDLE);
 
-		// Setting security level
-		// BASS requires an encrypted link FIRST
-		err = k_sem_take(&sem_security_updated, SEM_TIMEOUT);
-		if (err != 0) {
-			printk("Failed to take sem_security_updated (err %d)\n", err);
-			continue;
-		}
-
-		// BASS discovered
-		err = k_sem_take(&sem_bass_discovered, SEM_TIMEOUT);
-		if (err != 0) {
-			printk("Failed to take sem_bass_discovered (err %d)\n", err);
-			continue;
-		}
-
-		// Read states of sink - informational only
-		err = read_recv_states();
-		if (err != 0) {
-			printk("Failed to read receive states\n");
-			continue;
-		}
-
-		// Set SCANNING state
-		gatt_link_set_state(GATT_LINK_SCANNING);
-
-		// Scan for source - block until found
-		scan_for_broadcast_source();
-
-		printk("Selected source: id 0x%06X, sid %u, interval %u, addr %s\n", selected_broadcast_id, selected_sid, selected_pa_interval, bt_addr_le_str(&selected_addr));
-
-		/* 
-		 * Assistant does not sync to the periodic advertising train
-		 * itself. Instead the sink is told to sync (pa_sync = true) and
-		 * to choose its own BIS.
+		/* Journey loop — one iteration per stop request from the phone.
+		 * Exits when the sink drops, and the outer loop reconnects.
 		 */
-		// Build the Add Source
-		param.addr = selected_addr;
-		param.adv_sid = selected_sid;
-		param.broadcast_id = selected_broadcast_id;
-		param.pa_interval = selected_pa_interval;
-		param.pa_sync = true;
+		while (broadcast_sink_conn != NULL) {
+			uint8_t stop;
 
-		// Let sink read the BASE and pick own BIS channels
-		subgroup.bis_sync = BT_BAP_BIS_SYNC_NO_PREF;
-		subgroup.metadata_len = 0;
+			if (gatt_link_wait_for_command(K_FOREVER) != 0) {
+				continue;
+			}
 
-		param.num_subgroups = 1;
-		param.subgroups = &subgroup;
+			/* The sink holds one receive state, so the old source
+			 * must go before the new one can be added.
+			 */
+			remove_current_source();
 
-		printk("Adding source to the sink\n");
+			stop = gatt_link_get_requested_stop_index();
 
-		// Add Source - GATT writes to BASS control point
-		err = bt_bap_broadcast_assistant_add_src(broadcast_sink_conn, &param);
-		if (err) {
-			printk("Failed to add source (err %d)\n", err);
-			continue;
+			if (stop == 0) {
+				printk("Journey ended\n");
+				gatt_link_set_state(GATT_LINK_IDLE);
+				continue;
+			}
+
+			printk("Joining stop %u\n", stop);
+			(void)join_requested_stop();
 		}
 
-		// Set CONNECTING state after Add Source
-		gatt_link_set_state(GATT_LINK_CONNECTING);
-
-		printk("Add Source sent — watch the receive state callback\n");
-
-		k_sleep(K_FOREVER);
+		printk("Sink connection lost, reconnecting\n");
 	}
-
+	
 	return 0;
 }
