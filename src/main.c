@@ -35,6 +35,7 @@
 
 #include "metadata.h"
 #include "gatt_link.h"
+#include "sink_link.h"
 
 // Definitions
 #define NAME_LEN 30 // 30 bytes, size of name buffers
@@ -276,6 +277,12 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			printk("Broadcast Sink Found:\n");
 			printk("BT Name: %s\n", sr_info.bt_name);
 
+			// Once a sink is remembered, only reconnect to that one
+			if (sink_link_has_sink() && !sink_link_matches(info->addr)) {
+				printk("Not the remembered sink, ignoring\n\n");
+				return;
+			}
+
 			// Stop scanning, no data more is needed
 			err = bt_le_scan_stop();
 			if (err != 0) {
@@ -392,6 +399,12 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	// Success, set connected semaphore
 	printk("Connected: %s\n", bt_conn_dst_str(conn));
+
+	// Set sink once connected
+	if (!sink_link_has_sink()) {
+		sink_link_set(bt_conn_get_dst(conn));
+	}
+
 	k_sem_give(&sem_sink_connected);
 }
 
@@ -792,8 +805,9 @@ int main(void)
 
 		gatt_link_set_state(GATT_LINK_IDLE);
 
-		/* Journey loop — one iteration per stop request from the phone.
-		 * Exits when the sink drops, and the outer loop reconnects.
+		/* 
+		 * Journey loop - exits when the sink drops.
+		 * Outer loop reconnects.
 		 */
 		while (broadcast_sink_conn != NULL) {
 			uint8_t stop;
@@ -802,7 +816,8 @@ int main(void)
 				continue;
 			}
 
-			/* The sink holds one receive state, so the old source
+			/* 
+			 * The sink holds one receive state, so the old source
 			 * must go before the new one can be added.
 			 */
 			remove_current_source();
@@ -821,6 +836,6 @@ int main(void)
 
 		printk("Sink connection lost, reconnecting\n");
 	}
-	
+
 	return 0;
 }

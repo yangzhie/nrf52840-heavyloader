@@ -8,6 +8,7 @@ target_sources(app PRIVATE
   src/main.c
   src/metadata.c
   src/gatt_link.c
+  src/sink_link.c
 )
 
 zephyr_library_include_directories(${ZEPHYR_BASE}/samples/bluetooth)
