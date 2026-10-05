@@ -232,10 +232,10 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 			}
 
 			// Check: advertisement comes from the correct stop with provisioned dongle
-			if (sr_info.metadata.stop_index != gatt_link_get_requested_stop_index()) {
-				// Abandon the advertisement
-				return;
-			}
+			// if (sr_info.metadata.stop_index != gatt_link_get_requested_stop_index()) {
+			// 	// Abandon the advertisement
+			// 	return;
+			// }
 			
 			// Stop scanning, no data more is needed
 			err = bt_le_scan_stop();
@@ -400,6 +400,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		return;
 	}
 
+	// Set state
+	gatt_link_set_state(GATT_LINK_NO_SINK);
+
 	printk("Disconnected: %s, reason 0x%02x %s\n", bt_conn_dst_str(conn), reason, bt_hci_err_to_str(reason));
 
 	// Release reference and clear handle
@@ -459,6 +462,8 @@ static void bap_broadcast_assistant_add_src_cb(struct bt_conn *conn, int err)
 	if (err == 0) {
 		printk("BASS add source successful\n");
 	} else {
+		// Add FAILED state for BASS
+		gatt_link_set_state(GATT_LINK_FAILED);
 		printk("BASS add source failed (%d)\n", err);
 	}
 }
@@ -487,10 +492,22 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 		       state->adv_sid, state->pa_sync_state, state->encrypt_state,
 		       state->num_subgroups);
 
+		bool receiving = false;
+
 		for (uint8_t i = 0; i < state->num_subgroups; i++) {
 			const struct bt_bap_bass_subgroup *subgroup = &state->subgroups[i];
 
 			printk("\t[%d]: BIS sync %u, metadata_len %u\n", i, subgroup->bis_sync, subgroup->metadata_len);
+		
+			if (subgroup->bis_sync != 0) {
+				receiving = true;
+			}
+		}
+
+		if (receiving) {
+			gatt_link_set_state(GATT_LINK_RECEIVING);
+		} else if (state->pa_sync_state == 3) {
+			gatt_link_set_state(GATT_LINK_FAILED);
 		}
 	}
 
@@ -605,6 +622,9 @@ int main(void)
 		printk("Failed to start the phone link (err %d)\n", err);
 	}
 
+	// Set IDLE state
+	gatt_link_set_state(GATT_LINK_IDLE);
+
 	printk("Bluetooth initialized\n");
 
 	// Registers the two callback structs with Zephyr
@@ -658,6 +678,9 @@ int main(void)
 			continue;
 		}
 
+		// Set SCANNING state
+		gatt_link_set_state(GATT_LINK_SCANNING);
+
 		// Scan for source - block until found
 		scan_for_broadcast_source();
 
@@ -690,6 +713,9 @@ int main(void)
 			printk("Failed to add source (err %d)\n", err);
 			continue;
 		}
+
+		// Set CONNECTING state after Add Source
+		gatt_link_set_state(GATT_LINK_CONNECTING);
 
 		printk("Add Source sent — watch the receive state callback\n");
 

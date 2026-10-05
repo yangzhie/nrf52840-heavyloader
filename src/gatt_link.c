@@ -16,6 +16,9 @@ static uint8_t requested_stop_index = 1;
 // Phone has notifications on?
 static bool notifications_enabled;
 
+// Storing current state
+static enum gatt_link_state current_state = GATT_LINK_IDLE;
+
 /**
  * Names for the GATT DB, which is a flat list
  * of attributes.
@@ -111,23 +114,42 @@ BT_GATT_SERVICE_DEFINE(auracast_svc,
 		    BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
-uint8_t gatt_link_get_requested_stop_index(void)
-{
-	return requested_stop_index;
-}
-
-void gatt_link_notify_state(uint8_t state)
+static void gatt_link_notify_state(enum gatt_link_state state)
 {
 	if (!notifications_enabled) {
 		return;
 	}
 
+	uint8_t value = (uint8_t)state;
+
 	/** 
-     * Attribute 3 is the status characteristic's value, counting from
+	 * Attribute 4 is the status characteristic's value, counting from
 	 * the service declaration at index 0.
 	 */
-	bt_gatt_notify(NULL, &auracast_svc.attrs[3], &state, sizeof(state));
+	int err = bt_gatt_notify(NULL, &auracast_svc.attrs[4], &value, sizeof(value));
+
+	// Logging failure
+	if (err != 0) {
+		printk("Notify failed (err %d)\n", err);
+	}
 }
+
+void gatt_link_set_state(enum gatt_link_state state)
+{
+	if (state == current_state) {
+		return;
+	}
+
+	current_state = state;
+	printk("State: %u\n", (unsigned)state);
+	gatt_link_notify_state(state);
+}
+
+uint8_t gatt_link_get_requested_stop_index(void)
+{
+	return requested_stop_index;
+}
+
 
 int gatt_link_init(void) 
 {
