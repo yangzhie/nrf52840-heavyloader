@@ -25,7 +25,6 @@ bool metadata_parse(const uint8_t *data, size_t len, struct metadata *out)
     out->stop_index = data[5];
     out->direction = data[6];
     out->language = data[7];
-    out->audio_id = data[8];
 
     return true;
 }

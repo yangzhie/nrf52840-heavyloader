@@ -7,7 +7,7 @@
 #define METADATA_MAGIC_0 0x41 // "A"
 #define METADATA_MAGIC_1 0x55 // "U"
 #define METADATA_VERSION 1
-#define METADATA_MIN_LEN 9
+#define METADATA_MIN_LEN 8
 #define METADATA_COMPANY_ID 0xFFFF
 
 // Metadata header - receiving from Broadcast Source
@@ -18,7 +18,6 @@ struct metadata
     uint8_t stop_index;
     uint8_t direction;
     uint8_t language;
-    uint8_t audio_id;
 };
 
 /**

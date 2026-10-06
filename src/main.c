@@ -801,6 +801,7 @@ int main(void)
 	// Set IDLE state
 	gatt_link_set_state(GATT_LINK_IDLE);
 
+	printk("Sink ready, waiting for a stop request\n");
 	printk("Bluetooth initialized\n");
 
 	// Registers the two callback structs with Zephyr

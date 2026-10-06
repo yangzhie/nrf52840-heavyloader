@@ -23,7 +23,6 @@ ZTEST(metadata, test_decodes_every_field_of_stop_1)
 	zassert_equal(m.stop_index, 1);
 	zassert_equal(m.direction, 0);
 	zassert_equal(m.language, 1);
-	zassert_equal(m.audio_id, 1);
 }
 
 ZTEST(metadata, test_decodes_all_four_stops)
