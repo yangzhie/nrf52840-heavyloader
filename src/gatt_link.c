@@ -119,6 +119,11 @@ BT_GATT_SERVICE_DEFINE(auracast_svc,
 		    BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
+void gatt_link_drain_commands(void)
+{
+	k_sem_reset(&sem_command_received);
+}
+
 int gatt_link_wait_for_command(k_timeout_t timeout)
 {
 	return k_sem_take(&sem_command_received, timeout);

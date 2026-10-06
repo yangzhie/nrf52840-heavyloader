@@ -63,6 +63,9 @@ static struct bt_conn *broadcast_sink_conn;
 // Sink's handle for source - 0 = none active
 static uint8_t current_src_id;
 
+// Receive state describing some other source isn't mistaken for ours
+static bool expecting_src_id;
+
 // Source scan findings - callbacks fill, main adds to source
 static uint8_t remote_recv_state_count; // How many receive states the sink exposes
 static uint32_t selected_broadcast_id;
@@ -226,25 +229,23 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 
 		// Check: parsing found a Broadcast Audio Announcement
 		if (sr_info.broadcast_id != BT_BAP_INVALID_BROADCAST_ID) {
-			printk("Broadcast Source Found:\n");
-			printk("BT Name: %s\n", sr_info.bt_name);
-			printk("Broadcast Name: %s\n", sr_info.broadcast_name);
-			printk("Broadcast ID: 0x%06x\n\n", sr_info.broadcast_id);
-
 			// Check: metadata is present in incoming Auracast broadcast
 			if (sr_info.has_metadata) {
-				printk("Route: %u, Stop: %u, Dir: %u, Lang: %u\n",
-					sr_info.metadata.route_id, sr_info.metadata.stop_index,
-					sr_info.metadata.direction, sr_info.metadata.language);
+				return;
 			} else {
 				printk("No project metadata\n");
 			}
 
 			// Check: advertisement comes from the correct stop with provisioned dongle
-			// if (sr_info.metadata.stop_index != gatt_link_get_requested_stop_index()) {
-			// 	// Abandon the advertisement
-			// 	return;
-			// }
+			if (sr_info.metadata.stop_index != gatt_link_get_requested_stop_index()) {
+				// Abandon the advertisement
+				return;
+			}
+
+			printk("Broadcast Source Found:\n");
+			printk("BT Name: %s\n", sr_info.bt_name);
+			printk("Broadcast Name: %s\n", sr_info.broadcast_name);
+			printk("Broadcast ID: 0x%06x\n\n", sr_info.broadcast_id);
 			
 			// Stop scanning, no data more is needed
 			err = bt_le_scan_stop();
@@ -529,7 +530,10 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 	// State table is non-empty, can connect to sink
 	if (state != NULL) {
 		// Set source's ID
-		current_src_id = state->src_id;
+		if (expecting_src_id) {
+			current_src_id = state->src_id;
+			expecting_src_id = false;
+		}
 		
 		// Sink asks for code when synced to periodic advertising
 		if (state->encrypt_state == BT_BAP_BIG_ENC_STATE_BCODE_REQ) {
@@ -608,6 +612,7 @@ static void reset(void)
 
 	// Clear source
 	current_src_id = 0;
+	expecting_src_id = false;
 
 	k_sem_reset(&sem_source_discovered);
 	k_sem_reset(&sem_sink_connected);
@@ -769,6 +774,7 @@ static int join_requested_stop(void)
 		return err;
 	}
 
+	expecting_src_id = true;
 	gatt_link_set_state(GATT_LINK_CONNECTING);
 	return 0;
 }
@@ -830,6 +836,8 @@ int main(void)
 				// Re-check the sink
 				continue;
 			}
+
+			gatt_link_drain_commands();
 
 			/* 
 			 * The sink holds one receive state, so the old source

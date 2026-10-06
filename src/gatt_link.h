@@ -39,3 +39,9 @@ void gatt_link_set_state(enum gatt_link_state state);
  * @return 0 if a command arrived
  */
 int gatt_link_wait_for_command(k_timeout_t timeout);
+
+/**
+ * Discard any commands that arrived while the board was busy handling
+ * the previous one.
+ */
+void gatt_link_drain_commands(void);
