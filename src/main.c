@@ -230,10 +230,8 @@ static void scan_recv_cb(const struct bt_le_scan_recv_info *info, struct net_buf
 		// Check: parsing found a Broadcast Audio Announcement
 		if (sr_info.broadcast_id != BT_BAP_INVALID_BROADCAST_ID) {
 			// Check: metadata is present in incoming Auracast broadcast
-			if (sr_info.has_metadata) {
+			if (!sr_info.has_metadata) {
 				return;
-			} else {
-				printk("No project metadata\n");
 			}
 
 			// Check: advertisement comes from the correct stop with provisioned dongle
@@ -475,6 +473,31 @@ static void bap_broadcast_assistant_discover_cb(struct bt_conn *conn, int err, u
 }
 
 /**
+ * Reads the sink's receive state directly.
+ *
+ * The JM320 does not reliably notify after a source swap, so asking is
+ * the only way to learn whether the new source actually took. A read is
+ * mandatory in BASS where notifications are optional.
+ */
+static void recv_state_poll_handler(struct k_work *work)
+{
+	int err;
+
+	if (broadcast_sink_conn == NULL) {
+		return;
+	}
+
+	printk("Polling the sink's receive state\n");
+
+	err = bt_bap_broadcast_assistant_read_recv_state(broadcast_sink_conn, 0);
+	if (err != 0) {
+		printk("Polled read failed (%d)\n", err);
+	}
+}
+
+static K_WORK_DELAYABLE_DEFINE(recv_state_poll, recv_state_poll_handler);
+
+/**
  * When bt_bap_broadcast_assistant_add_src adds a source
  * via sink's BASS service. 
  * 
@@ -483,15 +506,19 @@ static void bap_broadcast_assistant_discover_cb(struct bt_conn *conn, int err, u
  */
 static void bap_broadcast_assistant_add_src_cb(struct bt_conn *conn, int err)
 {
-	if (err == 0) {
-		printk("BASS add source successful\n");
-	} else {
-		// Add FAILED state for BASS
+	if (err != 0) {
 		gatt_link_set_state(GATT_LINK_FAILED);
 		printk("BASS add source failed (%d)\n", err);
+		return;
 	}
-}
 
+	printk("BASS add source successful\n");
+
+	/* Scheduled rather than called directly: a GATT read cannot be
+	 * issued from inside a GATT callback.
+	 */
+	k_work_schedule(&recv_state_poll, K_SECONDS(2));
+}
 /**
  * Adding a source via sink's BASS service. 
  * 
@@ -562,6 +589,8 @@ static void bap_broadcast_assistant_recv_state_read_cb(struct bt_conn *conn, int
 			gatt_link_set_state(GATT_LINK_RECEIVING);
 		} else if (state->pa_sync_state == 3) {
 			gatt_link_set_state(GATT_LINK_FAILED);
+		} else {
+			gatt_link_set_state(GATT_LINK_CONNECTING);
 		}
 	}
 
